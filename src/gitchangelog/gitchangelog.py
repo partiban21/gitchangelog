@@ -736,6 +736,7 @@ GIT_FORMAT_KEYS = {
     'committer_date_timestamp': "%ct",
     'raw_body': "%B",
     'body': "%b",
+    'notes': "%N"
 }
 
 GIT_FULL_FORMAT_STRING = "%x00".join(GIT_FORMAT_KEYS.values())
@@ -1240,13 +1241,110 @@ class GitRepos(object):
             plog.stderr.close()
 
 
+def is_valid_changelog_message(changelog_msg, ignore_regexps):
+    """
+    Checks if message matches any of the regex patterns in
+    the list provided.
+
+    :param changelog_msg: changelog message
+    :type changelog_msg: str
+    :param ignore_regexps:
+    :type ignore_regexps: list of str
+    :return: If match found return False, else True
+    :rtype: bool
+    """
+    # any commits that match the ignore_regexps are not valid
+    for pattern in ignore_regexps:
+        if re.search(pattern, changelog_msg) is not None:
+            return False
+
+    return True
+
+
 def first_matching(section_regexps, string):
     for section, regexps in section_regexps:
         if regexps is None:
             return section
         for regexp in regexps:
-            if re.search(regexp, string) is not None:
+            if re.search(regexp, string, re.MULTILINE) is not None:
                 return section
+
+
+def git_notes_for_changelog(git_note_msg, ignore_regexps, section_regexps):
+    """
+    Checks if git notes has a message that can be used in changelog.
+
+    :param git_note_msg: git notes message being tested
+    :param ignore_regexps: Regular expressions for messages that should
+      be ignored
+    :param section_regexps: Regular expressions for prefixes of valid
+      messages
+    :return: (valid_notes, section_name, changelog_msg)
+      If no git notes message is found/valid return tuple:
+      (False, None, None)
+      else not matched section found
+      (True, None, 'example git notes')
+      else
+      (True, 'fix', 'example message')
+    :rtype: tuple (bool, str/None, str/None)
+    """
+    # empty git notes message
+    if git_note_msg == '':
+        return False, None, None
+
+    # any commits that match the ignore_regexps are not valid
+    if not is_valid_changelog_message(git_note_msg, ignore_regexps):
+        return False, None, None
+
+    # returns None, if no prefix/section match
+    matched_section = first_matching(section_regexps, git_note_msg)
+
+    return True, matched_section, git_note_msg
+
+
+def get_changelog_msg(commit, ignore_regexps, section_regexps, include_notes=True):
+    """
+    Returns the changelog message to be used for the commit provided.
+
+    :param commit: GitCommit reference
+    :type commit: gitchangelog.gitchangelog.GitCommit
+    :param ignore_regexps: List of regular expressions describing what
+      git commit messages to ignore
+    :type ignore_regexps: List of str
+    :param section_regexps: List of regular expressions describing valid
+      prefix's for git commit messages
+    :type section_regexps: List of str
+    :param include_notes: whether to include commit notes in the log or not
+    :type include_notes: bool
+    :return: (changelog message, section_name)
+      e.g.
+      If no valid git notes or git commits
+      (None, None)
+      else
+      ('some random fix', 'fix')
+    :rtype: tuple (str/None, str/None)
+    """
+    if include_notes:
+        valid_notes, matched_section, changelog_msg = \
+            git_notes_for_changelog(commit.notes, ignore_regexps, section_regexps)
+    else:
+        valid_notes = False
+
+    if valid_notes is False or not matched_section:
+        # check git commit for valid changelog message
+        if not is_valid_changelog_message(commit.subject, ignore_regexps):
+            return None, None
+
+        matched_section = first_matching(section_regexps, commit.subject)
+        changelog_msg = commit.subject
+    else:
+        # split git notes message to head and body
+        raw_body = changelog_msg.split('\n')
+        changelog_msg = ''.join(raw_body[:1])
+        body = '\n'.join(raw_body[1:])
+        setattr(commit, 'body', body)
+
+    return changelog_msg, matched_section
 
 
 def ensure_template_file_exists(label, template_name):
@@ -1509,6 +1607,7 @@ def versions_data_iter(repository, revlist=None,
                        section_regexps=[(None, '')],
                        tag_filter_regexp=r"\d+\.\d+(\.\d+)?",
                        include_merge=True,
+                       include_notes=True,
                        body_process=lambda x: x,
                        subject_process=lambda x: x,
                        log_encoding=DEFAULT_GIT_LOG_ENCODING,
@@ -1524,6 +1623,7 @@ def versions_data_iter(repository, revlist=None,
     :param section_regexps: regexps identifying sections
     :param tag_filter_regexp: regexp to match tags used as version
     :param include_merge: whether to include merge commits in the log or not
+    :param include_notes: whether to include git note commits in the log or not
     :param body_process: text processing object to apply to body
     :param subject_process: text processing object to apply to subject
     :param log_encoding: the encoding used in git logs
@@ -1589,18 +1689,21 @@ def versions_data_iter(repository, revlist=None,
             encoding=log_encoding)
 
         for commit in commits:
-            if any(re.search(pattern, commit.subject) is not None
-                   for pattern in ignore_regexps):
+            changelog_msg, matched_section = get_changelog_msg(
+                commit,
+                ignore_regexps,
+                section_regexps,
+                include_notes
+            )
+            if changelog_msg is None:
                 continue
-
-            matched_section = first_matching(section_regexps, commit.subject)
 
             ## Finally storing the commit in the matching section
 
             sections[matched_section].append({
                 "author": commit.author_name,
                 "authors": commit.author_names,
-                "subject": subject_process(commit.subject),
+                "subject": subject_process(changelog_msg),
                 "body": body_process(commit.body),
                 "commit": commit,
             })
@@ -1961,6 +2064,7 @@ def main():
             tag_filter_regexp=config['tag_filter_regexp'],
             output_engine=config.get("output_engine", rest_py),
             include_merge=config.get("include_merge", True),
+            include_notes=config.get("include_notes", True),
             body_process=config.get("body_process", noop),
             subject_process=config.get("subject_process", noop),
             log_encoding=log_encoding,

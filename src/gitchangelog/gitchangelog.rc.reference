@@ -201,6 +201,15 @@ output_engine = rest_py
 include_merge = True
 
 
+## ``include_notes`` is a boolean
+##
+## This option tells git-log whether to include notes commits in the log.
+## The default is to include them. If git-notes is true, the git-notes
+## message takes precedcence over the git commit in the changelog. However,
+## if there is no git-note message the changelog defaults back to the commit.
+include_notes = False
+
+
 ## ``log_encoding`` is a string identifier
 ##
 ## This option tells gitchangelog what encoding is outputed by ``git log``.
